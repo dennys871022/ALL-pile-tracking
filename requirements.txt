@@ -1,0 +1,13 @@
+streamlit
+pandas
+plotly
+xlsxwriter
+openpyxl
+gspread
+oauth2client
+matplotlib
+adjustText
+chardet>=5.0
+adjustText
+google-api-python-client
+ezdxf
