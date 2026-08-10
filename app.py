@@ -66,14 +66,38 @@ else:
 # ============================================================
 # Google Sheets 連線 (只開試算表本身，不綁定固定工作表)
 # ============================================================
+def _load_gs_secrets():
+    """
+    支援兩種 secrets 寫法，自動判斷使用哪一種：
+    1) [connections.gsheets] 攤平格式：
+         [connections.gsheets]
+         spreadsheet = "https://docs.google.com/..."
+         type = "service_account"
+         private_key = "..."
+         ...(其餘服務帳號欄位)
+    2) 舊版：sheet_url + gcp_service_account (整包 JSON 字串包在三引號內)
+    回傳 (creds_dict, sheet_url)
+    """
+    try:
+        if "connections" in st.secrets and "gsheets" in st.secrets["connections"]:
+            cfg = dict(st.secrets["connections"]["gsheets"])
+            sheet_url = cfg.pop("spreadsheet", None) or cfg.pop("sheet_url", None)
+            if sheet_url:
+                return cfg, sheet_url
+    except Exception:
+        pass
+    creds_dict = json.loads(st.secrets["gcp_service_account"])
+    sheet_url = st.secrets["sheet_url"]
+    return creds_dict, sheet_url
+
 @st.cache_resource
 def get_gs_client():
     try:
         scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
-        creds_dict = json.loads(st.secrets["gcp_service_account"])
+        creds_dict, sheet_url = _load_gs_secrets()
         creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
         client = gspread.authorize(creds)
-        ss = client.open_by_url(st.secrets["sheet_url"])
+        ss = client.open_by_url(sheet_url)
         return ss
     except Exception as e:
         st.error(f"雲端連線異常: {e}")
@@ -87,7 +111,7 @@ def get_drive_service():
         return None
     try:
         scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
-        creds_dict = json.loads(st.secrets["gcp_service_account"])
+        creds_dict, _ = _load_gs_secrets()
         creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
         return build('drive', 'v3', credentials=creds)
     except Exception as e:
