@@ -68,14 +68,20 @@ else:
 # ============================================================
 def _load_gs_secrets():
     """
-    支援兩種 secrets 寫法，自動判斷使用哪一種：
+    支援三種 secrets 寫法，自動判斷使用哪一種：
     1) [connections.gsheets] 攤平格式：
          [connections.gsheets]
          spreadsheet = "https://docs.google.com/..."
          type = "service_account"
          private_key = "..."
          ...(其餘服務帳號欄位)
-    2) 舊版：sheet_url + gcp_service_account (整包 JSON 字串包在三引號內)
+    2) [gcp_service_account] TOML 表格 (推薦，最不容易踩換行/跳脫字元的雷)：
+         sheet_url = "https://docs.google.com/..."
+         [gcp_service_account]
+         type = "service_account"
+         private_key = "-----BEGIN PRIVATE KEY-----\n...\n-----END PRIVATE KEY-----\n"
+         ...
+    3) 舊版：sheet_url + gcp_service_account = 整包 JSON 字串包在三引號內 (最容易因換行格式出錯，不建議)
     回傳 (creds_dict, sheet_url)
     """
     try:
@@ -84,6 +90,14 @@ def _load_gs_secrets():
             sheet_url = cfg.pop("spreadsheet", None) or cfg.pop("sheet_url", None)
             if sheet_url:
                 return cfg, sheet_url
+    except Exception:
+        pass
+    try:
+        if "gcp_service_account" in st.secrets and not isinstance(st.secrets["gcp_service_account"], str):
+            creds_dict = dict(st.secrets["gcp_service_account"])
+            sheet_url = st.secrets["sheet_url"]
+            if creds_dict and sheet_url:
+                return creds_dict, sheet_url
     except Exception:
         pass
     creds_dict = json.loads(st.secrets["gcp_service_account"])
