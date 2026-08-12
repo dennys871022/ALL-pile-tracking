@@ -9,5 +9,4 @@ matplotlib
 adjustText
 chardet>=5.0
 adjustText
-google-api-python-client
 ezdxf
