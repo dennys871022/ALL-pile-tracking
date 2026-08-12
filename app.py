@@ -132,14 +132,20 @@ def get_ws(ss, name, header):
 SITE_LIST_WS = "工地清單"
 SITE_COLUMNS = [
     'site_id', 'site_name', 'total_piles',
-    'dxf_pile_block', 'dxf_boundary_layer', 'match_radius',
+    'dxf_pile_source', 'dxf_pile_block', 'dxf_boundary_layer', 'match_radius',
     'pdf_loc_note_right', 'pdf_loc_note_left', 'pdf_week_est',
     'dxf_drive_file_id'
 ]
 SITE_DEFAULTS = {
-    'total_piles': 262, 'dxf_pile_block': 'HH3', 'dxf_boundary_layer': '開挖邊界',
+    'total_piles': 262, 'dxf_pile_source': 'block', 'dxf_pile_block': 'HH3', 'dxf_boundary_layer': '開挖邊界',
     'match_radius': 800, 'pdf_loc_note_right': '', 'pdf_loc_note_left': '', 'pdf_week_est': 20,
     'dxf_drive_file_id': ''
+}
+PILE_SOURCE_LABELS = {
+    'block': '圖塊 (INSERT Block，未分解)',
+    'circle': '圓形 (CIRCLE，分解後常見)',
+    'point': '點 (POINT，分解後常見)',
+    'text': '文字本身位置 (沒有另外的幾何符號，直接拿文字座標當樁位)'
 }
 
 @st.cache_data(ttl=60)
@@ -199,10 +205,11 @@ if sel_site_name == "➕ 新增工地":
         n_id = st.text_input("工地代碼 (英數字，如 CDC / TPE01，用於雲端分頁命名，建立後不可更改)")
         n_name = st.text_input("工地顯示名稱 (如：CDC中間樁與共構樁)")
         n_total = st.number_input("樁位總支數", 1, 5000, 262)
-        n_block = st.text_input("DXF 樁位圖塊(Block)名稱 / CSV「名稱」欄位值", value="HH3",
-                                 help="CAD 裡樁位符號的圖塊(Block)名稱。若用舊版CSV匯入，對應原本 名稱=='HH3' 那個篩選值。")
-        n_layer = st.text_input("DXF 開挖邊界圖層(Layer)名稱", value="開挖邊界",
-                                 help="CAD 裡畫開挖邊界線的圖層名稱，程式會抓這個圖層裡的封閉多邊形。")
+        n_source = st.selectbox("樁位在DXF裡是用什麼畫的？", list(PILE_SOURCE_LABELS.keys()), format_func=lambda k: PILE_SOURCE_LABELS[k])
+        n_block = st.text_input("圖塊名稱 / 圖層名稱 (依上面選的類型而定)", value="HH3",
+                                 help="選「圖塊」：填CAD裡樁位符號的Block名稱。\n選「圓形」或「點」(通常是圖塊分解後的情況)：填這些圓形/點所在的圖層(Layer)名稱。\n選「文字本身位置」：這欄不用填。若用舊版CSV匯入，對應原本 名稱=='HH3' 那個篩選值。")
+        n_layer = st.text_input("DXF 開挖邊界圖層(Layer)名稱 (沒有邊界線可留空)", value="開挖邊界",
+                                 help="CAD 裡畫開挖邊界線的圖層名稱，程式會抓這個圖層裡的封閉多邊形。留空就不畫邊界。")
         n_radius = st.number_input("樁號文字比對半徑 (CAD單位)", 10, 100000, 800,
                                     help="樁位符號會抓「距離內最近的文字」當作樁號，這裡設定搜尋半徑。")
         n_right = st.text_input("PDF 右側標題預設文字", value="")
@@ -216,7 +223,7 @@ if sel_site_name == "➕ 新增工地":
             else:
                 add_site(ss, {
                     'site_id': n_id, 'site_name': n_name, 'total_piles': int(n_total),
-                    'dxf_pile_block': n_block, 'dxf_boundary_layer': n_layer, 'match_radius': int(n_radius),
+                    'dxf_pile_source': n_source, 'dxf_pile_block': n_block, 'dxf_boundary_layer': n_layer, 'match_radius': int(n_radius),
                     'pdf_loc_note_right': n_right, 'pdf_loc_note_left': n_left, 'pdf_week_est': int(n_week)
                 })
                 st.success(f"✅ 工地「{n_name}」已建立，重新整理頁面後即可從下拉選單選取。")
@@ -226,11 +233,31 @@ if sel_site_name == "➕ 新增工地":
 site_row = df_sites[df_sites['site_name'] == sel_site_name].iloc[0]
 site_id = str(site_row['site_id'])
 TOTAL_PILES = int(site_row['total_piles']) if str(site_row['total_piles']).strip() else 262
-DXF_PILE_BLOCK = str(site_row['dxf_pile_block']) or 'HH3'
-DXF_BOUNDARY_LAYER = str(site_row['dxf_boundary_layer']) or '開挖邊界'
+DXF_PILE_SOURCE = str(site_row.get('dxf_pile_source', '') or 'block').strip() or 'block'
+DXF_PILE_BLOCK = str(site_row['dxf_pile_block']) if str(site_row.get('dxf_pile_block', '')).strip() else 'HH3'
+DXF_BOUNDARY_LAYER = str(site_row.get('dxf_boundary_layer', '') or '').strip()
 MATCH_RADIUS = float(site_row['match_radius']) if str(site_row['match_radius']).strip() else 800
 
 st.caption(f"📍 目前工地：**{sel_site_name}** (代碼: {site_id})　樁位總支數：{TOTAL_PILES}")
+
+if not demo_mode:
+    with st.expander("⚙️ 編輯此工地的 DXF 讀取設定"):
+        with st.form(f"edit_site_{site_id}"):
+            e_total = st.number_input("樁位總支數", 1, 5000, TOTAL_PILES)
+            e_source = st.selectbox("樁位在DXF裡是用什麼畫的？", list(PILE_SOURCE_LABELS.keys()),
+                                     index=list(PILE_SOURCE_LABELS.keys()).index(DXF_PILE_SOURCE) if DXF_PILE_SOURCE in PILE_SOURCE_LABELS else 0,
+                                     format_func=lambda k: PILE_SOURCE_LABELS[k])
+            e_block = st.text_input("圖塊名稱 / 圖層名稱 (依上面選的類型而定，選「文字本身位置」則不用填)", value=DXF_PILE_BLOCK)
+            e_layer = st.text_input("DXF 開挖邊界圖層(Layer)名稱 (沒有邊界線可留空)", value=DXF_BOUNDARY_LAYER)
+            e_radius = st.number_input("樁號文字比對半徑 (CAD單位)", 10, 100000, int(MATCH_RADIUS))
+            if st.form_submit_button("💾 儲存設定"):
+                update_site_field(ss, site_id, 'total_piles', e_total)
+                update_site_field(ss, site_id, 'dxf_pile_source', e_source)
+                update_site_field(ss, site_id, 'dxf_pile_block', e_block)
+                update_site_field(ss, site_id, 'dxf_boundary_layer', e_layer)
+                update_site_field(ss, site_id, 'match_radius', e_radius)
+                st.success("✅ 已更新，重新整理套用新設定")
+                st.rerun()
 
 HIST_WS_NAME = f"{site_id}_施工明細"
 SETTINGS_WS_NAME = f"{site_id}_系統設定"
@@ -241,8 +268,16 @@ EXTRA_COLUMNS = ['樁號', 'X', 'Y']
 # ============================================================
 # 樁位/邊界資料來源：DXF 自動讀取 或 舊版 CSV 上傳
 # ============================================================
-def parse_dxf(file_bytes, pile_block, boundary_layer, match_radius=800):
-    """讀取 DXF：抓指定圖塊當樁位、抓最近文字當樁號、抓指定圖層封閉多邊形當開挖邊界"""
+def parse_dxf(file_bytes, pile_source, pile_block, boundary_layer, match_radius=800):
+    """
+    讀取 DXF：
+    - pile_source == 'block' : 抓指定「圖塊(Block)」的插入點當樁位 (pile_block = 圖塊名稱)
+    - pile_source == 'circle': 抓指定「圖層」上的圓形(CIRCLE)圓心當樁位 (pile_block = 圖層名稱；留空則不篩選圖層)
+    - pile_source == 'point' : 抓指定「圖層」上的點(POINT)當樁位 (pile_block = 圖層名稱；留空則不篩選圖層)
+    - pile_source == 'text'  : 沒有另外的幾何符號，直接把文字本身的座標當樁位
+    再抓「距離最近的文字」當樁號 (text 模式除外，樁號就是文字內容本身)。
+    boundary_layer 留空則不畫開挖邊界。
+    """
     with tempfile.NamedTemporaryFile(suffix='.dxf', delete=False) as tmp:
         tmp.write(file_bytes)
         tmp_path = tmp.name
@@ -269,48 +304,83 @@ def parse_dxf(file_bytes, pile_block, boundary_layer, match_radius=800):
             continue
     texts_df = pd.DataFrame(texts, columns=['X', 'Y', '內容'])
 
-    piles = []
-    for e in msp.query('INSERT'):
-        try:
-            if e.dxf.name.strip().upper() == pile_block.strip().upper():
-                ins = e.dxf.insert
-                piles.append((ins.x, ins.y))
-        except Exception:
-            continue
-    piles_df = pd.DataFrame(piles, columns=['X', 'Y'])
+    pile_block = (pile_block or '').strip()
 
-    def get_nearest_text(px, py):
+    if pile_source == 'text':
+        # 沒有幾何符號，文字本身的位置就是樁位，文字內容就是樁號
         if texts_df.empty:
-            return "未命名"
-        dist = np.sqrt((texts_df['X'] - px) ** 2 + (texts_df['Y'] - py) ** 2)
-        idx = dist.idxmin()
-        if dist[idx] < match_radius:
-            return str(texts_df.loc[idx, '內容']).strip()
-        return "未命名"
+            piles_df = pd.DataFrame(columns=['X', 'Y', '樁號', '數字'])
+        else:
+            piles_df = texts_df.rename(columns={'內容': '樁號'}).copy()
+            piles_df['樁號'] = piles_df['樁號'].astype(str).str.strip().str.upper()
+            piles_df = piles_df[piles_df['樁號'].str.contains(r'\d', regex=True, na=False)]
+            piles_df['數字'] = piles_df['樁號'].str.extract(r'(\d+)').fillna(0).astype(int)
+            piles_df = piles_df.drop_duplicates(subset=['樁號']).dropna(subset=['X', 'Y']).sort_values('數字').reset_index(drop=True)
+    else:
+        piles = []
+        if pile_source == 'block':
+            for e in msp.query('INSERT'):
+                try:
+                    if e.dxf.name.strip().upper() == pile_block.upper():
+                        ins = e.dxf.insert
+                        piles.append((ins.x, ins.y))
+                except Exception:
+                    continue
+        elif pile_source == 'circle':
+            for e in msp.query('CIRCLE'):
+                try:
+                    if (not pile_block) or e.dxf.layer.strip() == pile_block:
+                        c = e.dxf.center
+                        piles.append((c.x, c.y))
+                except Exception:
+                    continue
+        elif pile_source == 'point':
+            for e in msp.query('POINT'):
+                try:
+                    if (not pile_block) or e.dxf.layer.strip() == pile_block:
+                        loc = e.dxf.location
+                        piles.append((loc.x, loc.y))
+                except Exception:
+                    continue
 
-    if not piles_df.empty:
-        piles_df['樁號'] = piles_df.apply(lambda r: get_nearest_text(r['X'], r['Y']), axis=1)
-        piles_df['樁號'] = piles_df['樁號'].astype(str).str.strip().str.upper()
-        piles_df['數字'] = piles_df['樁號'].str.extract(r'(\d+)').fillna(0).astype(int)
-        piles_df = piles_df.drop_duplicates(subset=['樁號']).dropna(subset=['X', 'Y']).sort_values('數字').reset_index(drop=True)
+        piles_df = pd.DataFrame(piles, columns=['X', 'Y'])
+
+        def get_nearest_text(px, py):
+            if texts_df.empty:
+                return "未命名"
+            dist = np.sqrt((texts_df['X'] - px) ** 2 + (texts_df['Y'] - py) ** 2)
+            idx = dist.idxmin()
+            if dist[idx] < match_radius:
+                return str(texts_df.loc[idx, '內容']).strip()
+            return "未命名"
+
+        if not piles_df.empty:
+            piles_df['樁號'] = piles_df.apply(lambda r: get_nearest_text(r['X'], r['Y']), axis=1)
+            piles_df['樁號'] = piles_df['樁號'].astype(str).str.strip().str.upper()
+            piles_df['數字'] = piles_df['樁號'].str.extract(r'(\d+)').fillna(0).astype(int)
+            piles_df = piles_df.drop_duplicates(subset=['樁號']).dropna(subset=['X', 'Y']).sort_values('數字').reset_index(drop=True)
+        else:
+            piles_df = pd.DataFrame(columns=['X', 'Y', '樁號', '數字'])
 
     loops = []
-    for e in msp.query('LWPOLYLINE'):
-        try:
-            if e.dxf.layer == boundary_layer:
-                pts = [(p[0], p[1]) for p in e.get_points()]
-                if pts:
-                    loops.append(pts)
-        except Exception:
-            continue
-    for e in msp.query('POLYLINE'):
-        try:
-            if e.dxf.layer == boundary_layer:
-                pts = [(v.dxf.location.x, v.dxf.location.y) for v in e.vertices]
-                if pts:
-                    loops.append(pts)
-        except Exception:
-            continue
+    boundary_layer = (boundary_layer or '').strip()
+    if boundary_layer:
+        for e in msp.query('LWPOLYLINE'):
+            try:
+                if e.dxf.layer == boundary_layer:
+                    pts = [(p[0], p[1]) for p in e.get_points()]
+                    if pts:
+                        loops.append(pts)
+            except Exception:
+                continue
+        for e in msp.query('POLYLINE'):
+            try:
+                if e.dxf.layer == boundary_layer:
+                    pts = [(v.dxf.location.x, v.dxf.location.y) for v in e.vertices]
+                    if pts:
+                        loops.append(pts)
+            except Exception:
+                continue
 
     return piles_df, loops
 
@@ -385,7 +455,7 @@ with st.expander("📐 樁位圖 / 邊界圖 資料來源設定", expanded=df_ba
             if st.button("🔄 從 DXF 重新解析樁位與邊界"):
                 with st.spinner("解析 DXF 中..."):
                     try:
-                        piles_df, loops = parse_dxf(dxf_file.getvalue(), DXF_PILE_BLOCK, DXF_BOUNDARY_LAYER, MATCH_RADIUS)
+                        piles_df, loops = parse_dxf(dxf_file.getvalue(), DXF_PILE_SOURCE, DXF_PILE_BLOCK, DXF_BOUNDARY_LAYER, MATCH_RADIUS)
                         st.session_state.site_dxf_cache[site_id] = piles_df
                         st.session_state.site_boundary_cache[site_id] = loops
                         st.success(f"✅ 解析完成：讀到 {len(piles_df)} 支樁位、{len(loops)} 條邊界線")
