@@ -14,13 +14,6 @@ import gspread
 from oauth2client.service_account import ServiceAccountCredentials
 
 try:
-    from googleapiclient.discovery import build
-    from googleapiclient.http import MediaIoBaseUpload, MediaIoBaseDownload
-    GDRIVE_READY = True
-except ImportError:
-    GDRIVE_READY = False
-
-try:
     import matplotlib.pyplot as plt
     MATPLOTLIB_READY = True
 except ImportError:
@@ -118,46 +111,6 @@ def get_gs_client():
         return None
 
 ss = get_gs_client()
-
-@st.cache_resource
-def get_drive_service():
-    if not GDRIVE_READY:
-        return None
-    try:
-        scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
-        creds_dict, _ = _load_gs_secrets()
-        creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
-        return build('drive', 'v3', credentials=creds)
-    except Exception as e:
-        st.error(f"Google Drive 連線異常: {e}")
-        return None
-
-drive_service = get_drive_service()
-
-def upload_dxf_to_drive(drive_service, site_id, file_bytes):
-    """上傳 DXF 到 Google Drive，回傳新檔案的 file_id"""
-    file_metadata = {'name': f'{site_id}.dxf'}
-    folder_id = st.secrets.get("drive_folder_id", None)
-    if folder_id:
-        file_metadata['parents'] = [folder_id]
-    media = MediaIoBaseUpload(io.BytesIO(file_bytes), mimetype='application/dxf', resumable=False)
-    f = drive_service.files().create(body=file_metadata, media_body=media, fields='id').execute()
-    return f['id']
-
-def delete_drive_file(drive_service, file_id):
-    try:
-        drive_service.files().delete(fileId=file_id).execute()
-    except Exception:
-        pass
-
-def download_dxf_from_drive(_drive_service, file_id):
-    request = _drive_service.files().get_media(fileId=file_id)
-    buf = io.BytesIO()
-    downloader = MediaIoBaseDownload(buf, request)
-    done = False
-    while not done:
-        _, done = downloader.next_chunk()
-    return buf.getvalue()
 
 def get_ws(ss, name, header):
     """取得指定名稱的工作表，不存在就自動建立並寫入表頭"""
@@ -361,12 +314,6 @@ def parse_dxf(file_bytes, pile_block, boundary_layer, match_radius=800):
 
     return piles_df, loops
 
-@st.cache_data(ttl=3600, show_spinner="☁️ 從雲端讀取並解析 DXF 中...")
-def load_site_dxf_from_drive(_drive_service, file_id, pile_block, boundary_layer, match_radius):
-    """從 Drive 下載 DXF 並解析，結果依 file_id+設定 快取，多工地/多使用者各自獨立快取互不影響"""
-    file_bytes = download_dxf_from_drive(_drive_service, file_id)
-    return parse_dxf(file_bytes, pile_block, boundary_layer, match_radius)
-
 def parse_legacy_csv(boundary_file, pile_file, pile_block):
     """舊版 CSV 匯入路徑 (相容舊工地資料)"""
     try:
@@ -423,67 +370,43 @@ def parse_legacy_csv(boundary_file, pile_file, pile_block):
 
     return piles_df, loops
 
-DXF_DRIVE_ID = str(site_row.get('dxf_drive_file_id', '') or '').strip()
+df_base_raw = st.session_state.site_dxf_cache.get(site_id, pd.DataFrame(columns=['X', 'Y', '樁號', '數字']))
+boundary_loops = st.session_state.site_boundary_cache.get(site_id, [])
 
-df_base_raw = pd.DataFrame(columns=['X', 'Y', '樁號', '數字'])
-boundary_loops = []
+with st.expander("📐 樁位圖 / 邊界圖 資料來源設定", expanded=df_base_raw.empty):
+    st.caption("⚠️ 目前為暫時版本：DXF/CSV 僅存在本次瀏覽器工作階段，重新整理頁面需要重新上傳一次。永久記住(存到GitHub)之後補上。")
+    import_mode = st.radio("匯入方式", ["📄 上傳 DXF (自動讀取)", "📊 上傳舊版 CSV (排樁座標.csv + 中間樁.csv)"], horizontal=True, key=f"import_mode_{site_id}")
 
-if DXF_DRIVE_ID and EZDXF_READY and drive_service is not None:
-    try:
-        df_base_raw, boundary_loops = load_site_dxf_from_drive(drive_service, DXF_DRIVE_ID, DXF_PILE_BLOCK, DXF_BOUNDARY_LAYER, MATCH_RADIUS)
-    except Exception as e:
-        st.error(f"☁️ 雲端 DXF 讀取失敗: {e}")
-elif site_id in st.session_state.site_dxf_cache:
-    df_base_raw = st.session_state.site_dxf_cache.get(site_id, df_base_raw)
-    boundary_loops = st.session_state.site_boundary_cache.get(site_id, boundary_loops)
-
-with st.expander("📐 樁位圖 / 邊界圖 資料來源設定", expanded=(not DXF_DRIVE_ID and df_base_raw.empty)):
-    if DXF_DRIVE_ID:
-        st.success(f"☁️ 此工地已綁定雲端 DXF，自動載入 {len(df_base_raw)} 支樁位、{len(boundary_loops)} 條邊界線 (不需重新上傳)")
+    if import_mode.startswith("📄"):
+        if not EZDXF_READY:
+            st.error("尚未安裝 ezdxf 套件，請在 requirements.txt 加入 `ezdxf` 後重新部署。")
+        dxf_file = st.file_uploader("上傳工地 DXF 圖檔", type=['dxf'], key=f"dxf_up_{site_id}")
+        if dxf_file is not None and EZDXF_READY:
+            if st.button("🔄 從 DXF 重新解析樁位與邊界"):
+                with st.spinner("解析 DXF 中..."):
+                    try:
+                        piles_df, loops = parse_dxf(dxf_file.getvalue(), DXF_PILE_BLOCK, DXF_BOUNDARY_LAYER, MATCH_RADIUS)
+                        st.session_state.site_dxf_cache[site_id] = piles_df
+                        st.session_state.site_boundary_cache[site_id] = loops
+                        st.success(f"✅ 解析完成：讀到 {len(piles_df)} 支樁位、{len(loops)} 條邊界線")
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"DXF 解析失敗: {e}")
     else:
-        st.info("此工地尚未綁定雲端 DXF，請上傳一次後就會永久記住，之後開網頁自動讀取。")
+        c_up1, c_up2 = st.columns(2)
+        boundary_csv = c_up1.file_uploader("排樁座標.csv (開挖邊界)", type=['csv'], key=f"bcsv_{site_id}")
+        pile_csv = c_up2.file_uploader("中間樁.csv (樁位)", type=['csv'], key=f"pcsv_{site_id}")
+        if boundary_csv is not None and pile_csv is not None:
+            if st.button("🔄 從 CSV 重新解析樁位與邊界"):
+                with st.spinner("解析 CSV 中..."):
+                    piles_df, loops = parse_legacy_csv(boundary_csv, pile_csv, DXF_PILE_BLOCK)
+                st.session_state.site_dxf_cache[site_id] = piles_df
+                st.session_state.site_boundary_cache[site_id] = loops
+                st.success(f"✅ 解析完成：讀到 {len(piles_df)} 支樁位、{len(loops)} 條邊界線")
+                st.rerun()
 
-    if not demo_mode:
-        import_mode = st.radio("匯入/更新方式", ["📄 上傳 DXF (存到雲端，永久記住)", "📊 上傳舊版 CSV (僅本次瀏覽器暫用，不會永久記住)"], horizontal=True, key=f"import_mode_{site_id}")
-
-        if import_mode.startswith("📄"):
-            if not EZDXF_READY:
-                st.error("尚未安裝 ezdxf 套件，請在 requirements.txt 加入 `ezdxf` 後重新部署。")
-            if not GDRIVE_READY or drive_service is None:
-                st.error("Google Drive 連線異常，請確認 requirements.txt 有 `google-api-python-client`，且服務帳號已授權 Drive 權限。")
-            dxf_file = st.file_uploader("上傳工地 DXF 圖檔", type=['dxf'], key=f"dxf_up_{site_id}")
-            if dxf_file is not None and EZDXF_READY and GDRIVE_READY and drive_service is not None:
-                if st.button("☁️ 上傳並存為此工地的永久 DXF"):
-                    with st.spinner("上傳到 Google Drive 並解析中..."):
-                        file_bytes = dxf_file.getvalue()
-                        try:
-                            new_file_id = upload_dxf_to_drive(drive_service, site_id, file_bytes)
-                            piles_df, loops = parse_dxf(file_bytes, DXF_PILE_BLOCK, DXF_BOUNDARY_LAYER, MATCH_RADIUS)
-                            old_file_id = DXF_DRIVE_ID
-                            update_site_field(ss, site_id, 'dxf_drive_file_id', new_file_id)
-                            if old_file_id:
-                                delete_drive_file(drive_service, old_file_id)
-                            load_site_dxf_from_drive.clear()
-                            st.success(f"✅ 已存到雲端！讀到 {len(piles_df)} 支樁位、{len(loops)} 條邊界線。以後開網頁會自動載入，不用再傳一次。")
-                            st.rerun()
-                        except Exception as e:
-                            st.error(f"上傳/解析失敗: {e}")
-        else:
-            c_up1, c_up2 = st.columns(2)
-            boundary_csv = c_up1.file_uploader("排樁座標.csv (開挖邊界)", type=['csv'], key=f"bcsv_{site_id}")
-            pile_csv = c_up2.file_uploader("中間樁.csv (樁位)", type=['csv'], key=f"pcsv_{site_id}")
-            if boundary_csv is not None and pile_csv is not None:
-                if st.button("🔄 從 CSV 重新解析樁位與邊界 (本次暫用)"):
-                    with st.spinner("解析 CSV 中..."):
-                        piles_df, loops = parse_legacy_csv(boundary_csv, pile_csv, DXF_PILE_BLOCK)
-                    st.session_state.site_dxf_cache[site_id] = piles_df
-                    st.session_state.site_boundary_cache[site_id] = loops
-                    st.success(f"✅ 解析完成：讀到 {len(piles_df)} 支樁位、{len(loops)} 條邊界線 (僅本次瀏覽器工作階段)")
-                    st.rerun()
-
-        if DXF_DRIVE_ID and st.button("🔄 強制重新從雲端載入 (清除快取)"):
-            load_site_dxf_from_drive.clear()
-            st.rerun()
+    if not df_base_raw.empty or boundary_loops:
+        st.caption(f"目前已載入 {len(df_base_raw)} 支樁位、{len(boundary_loops)} 條邊界線")
 
 # ============================================================
 # 額外樁位 (人工補充，取代舊版寫死的座標公式)
