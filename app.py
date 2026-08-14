@@ -268,26 +268,67 @@ EXTRA_COLUMNS = ['樁號', 'X', 'Y']
 # ============================================================
 # 樁位/邊界資料來源：DXF 自動讀取 或 舊版 CSV 上傳
 # ============================================================
+def _load_dxf_doc(file_bytes):
+    """
+    容錯讀取 DXF：優先用標準讀取，失敗或發現結構問題就改用 ezdxf.recover
+    (Revit/Civil3D 等第三方軟體匯出的DXF常有非標準結構，recover模式會自動修復再讀取)
+    """
+    with tempfile.NamedTemporaryFile(suffix='.dxf', delete=False) as tmp:
+        tmp.write(file_bytes)
+        tmp_path = tmp.name
+    try:
+        try:
+            doc = ezdxf.readfile(tmp_path)
+        except Exception:
+            from ezdxf import recover
+            doc, auditor = recover.readfile(tmp_path)
+    finally:
+        try:
+            os.unlink(tmp_path)
+        except Exception:
+            pass
+    return doc
+
+@st.cache_data(show_spinner="🔍 掃描 DXF 內容中...")
+def scan_dxf_summary(file_bytes):
+    """掃描DXF，列出每個圖層上各種圖元的數量、以及每個圖層上INSERT圖塊的名稱與數量，供使用者對照設定"""
+    doc = _load_dxf_doc(file_bytes)
+    msp = doc.modelspace()
+    layer_entity_counter = {}
+    insert_block_counter = {}
+    for e in msp:
+        try:
+            layer = e.dxf.layer
+        except Exception:
+            layer = '(無圖層)'
+        et = e.dxftype()
+        key = (layer, et)
+        layer_entity_counter[key] = layer_entity_counter.get(key, 0) + 1
+        if et == 'INSERT':
+            try:
+                bkey = (layer, e.dxf.name)
+                insert_block_counter[bkey] = insert_block_counter.get(bkey, 0) + 1
+            except Exception:
+                pass
+    df_layer = pd.DataFrame(
+        [{'圖層': k[0], '圖元類型': k[1], '數量': v} for k, v in layer_entity_counter.items()]
+    ).sort_values(['圖層', '數量'], ascending=[True, False])
+    df_block = pd.DataFrame(
+        [{'圖層': k[0], '圖塊名稱': k[1], '數量': v} for k, v in insert_block_counter.items()]
+    ).sort_values('數量', ascending=False)
+    return df_layer, df_block
+
 def parse_dxf(file_bytes, pile_source, pile_block, boundary_layer, match_radius=800):
     """
     讀取 DXF：
-    - pile_source == 'block' : 抓指定「圖塊(Block)」的插入點當樁位 (pile_block = 圖塊名稱)
+    - pile_source == 'block' : 抓指定「圖塊(Block)」的插入點當樁位 (pile_block = 圖塊名稱，支援部分包含比對)
     - pile_source == 'circle': 抓指定「圖層」上的圓形(CIRCLE)圓心當樁位 (pile_block = 圖層名稱；留空則不篩選圖層)
     - pile_source == 'point' : 抓指定「圖層」上的點(POINT)當樁位 (pile_block = 圖層名稱；留空則不篩選圖層)
     - pile_source == 'text'  : 沒有另外的幾何符號，直接把文字本身的座標當樁位
     再抓「距離最近的文字」當樁號 (text 模式除外，樁號就是文字內容本身)。
     boundary_layer 留空則不畫開挖邊界。
     """
-    with tempfile.NamedTemporaryFile(suffix='.dxf', delete=False) as tmp:
-        tmp.write(file_bytes)
-        tmp_path = tmp.name
-    try:
-        doc = ezdxf.readfile(tmp_path)
-    finally:
-        try:
-            os.unlink(tmp_path)
-        except Exception:
-            pass
+    doc = _load_dxf_doc(file_bytes)
     msp = doc.modelspace()
 
     texts = []
@@ -319,11 +360,14 @@ def parse_dxf(file_bytes, pile_source, pile_block, boundary_layer, match_radius=
     else:
         piles = []
         if pile_source == 'block':
-            for e in msp.query('INSERT'):
+            all_inserts = list(msp.query('INSERT'))
+            pb_norm = pile_block.upper()
+            exact = [e for e in all_inserts if getattr(e.dxf, 'name', '').strip().upper() == pb_norm]
+            candidates = exact if exact else [e for e in all_inserts if pb_norm in getattr(e.dxf, 'name', '').strip().upper()]
+            for e in candidates:
                 try:
-                    if e.dxf.name.strip().upper() == pile_block.upper():
-                        ins = e.dxf.insert
-                        piles.append((ins.x, ins.y))
+                    ins = e.dxf.insert
+                    piles.append((ins.x, ins.y))
                 except Exception:
                     continue
         elif pile_source == 'circle':
@@ -452,13 +496,30 @@ with st.expander("📐 樁位圖 / 邊界圖 資料來源設定", expanded=df_ba
             st.error("尚未安裝 ezdxf 套件，請在 requirements.txt 加入 `ezdxf` 後重新部署。")
         dxf_file = st.file_uploader("上傳工地 DXF 圖檔", type=['dxf'], key=f"dxf_up_{site_id}")
         if dxf_file is not None and EZDXF_READY:
-            if st.button("🔄 從 DXF 重新解析樁位與邊界"):
+            c_scan, c_parse = st.columns(2)
+            if c_scan.button("🔍 掃描這份DXF的圖層/圖塊清單"):
+                with st.spinner("掃描中..."):
+                    try:
+                        df_layer_scan, df_block_scan = scan_dxf_summary(dxf_file.getvalue())
+                        st.markdown("**各圖層的圖元數量：**")
+                        st.dataframe(df_layer_scan, use_container_width=True, height=250)
+                        st.markdown("**各圖層裡的圖塊(INSERT)名稱與數量 (可直接複製貼到「圖塊名稱」欄位)：**")
+                        if df_block_scan.empty:
+                            st.caption("這份DXF裡沒有任何圖塊(INSERT)，如果樁位是圓形/點，請往上看「圖元類型」欄位找 CIRCLE 或 POINT 所在圖層。")
+                        else:
+                            st.dataframe(df_block_scan, use_container_width=True, height=250)
+                    except Exception as e:
+                        st.error(f"掃描失敗: {e}")
+            if c_parse.button("🔄 從 DXF 重新解析樁位與邊界"):
                 with st.spinner("解析 DXF 中..."):
                     try:
                         piles_df, loops = parse_dxf(dxf_file.getvalue(), DXF_PILE_SOURCE, DXF_PILE_BLOCK, DXF_BOUNDARY_LAYER, MATCH_RADIUS)
                         st.session_state.site_dxf_cache[site_id] = piles_df
                         st.session_state.site_boundary_cache[site_id] = loops
-                        st.success(f"✅ 解析完成：讀到 {len(piles_df)} 支樁位、{len(loops)} 條邊界線")
+                        if piles_df.empty:
+                            st.warning("⚠️ 解析完成，但讀到 0 支樁位，請先用左邊「掃描」按鈕確認圖層/圖塊名稱有沒有打對。")
+                        else:
+                            st.success(f"✅ 解析完成：讀到 {len(piles_df)} 支樁位、{len(loops)} 條邊界線")
                         st.rerun()
                     except Exception as e:
                         st.error(f"DXF 解析失敗: {e}")
