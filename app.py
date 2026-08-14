@@ -501,15 +501,47 @@ with st.expander("📐 樁位圖 / 邊界圖 資料來源設定", expanded=df_ba
                 with st.spinner("掃描中..."):
                     try:
                         df_layer_scan, df_block_scan = scan_dxf_summary(dxf_file.getvalue())
-                        st.markdown("**各圖層的圖元數量：**")
-                        st.dataframe(df_layer_scan, use_container_width=True, height=250)
-                        st.markdown("**各圖層裡的圖塊(INSERT)名稱與數量 (可直接複製貼到「圖塊名稱」欄位)：**")
-                        if df_block_scan.empty:
-                            st.caption("這份DXF裡沒有任何圖塊(INSERT)，如果樁位是圓形/點，請往上看「圖元類型」欄位找 CIRCLE 或 POINT 所在圖層。")
-                        else:
-                            st.dataframe(df_block_scan, use_container_width=True, height=250)
+                        st.session_state[f'scan_layer_{site_id}'] = df_layer_scan
+                        st.session_state[f'scan_block_{site_id}'] = df_block_scan
                     except Exception as e:
                         st.error(f"掃描失敗: {e}")
+
+            df_layer_scan = st.session_state.get(f'scan_layer_{site_id}')
+            df_block_scan = st.session_state.get(f'scan_block_{site_id}')
+
+            if df_layer_scan is not None:
+                st.markdown("**各圖層的圖元數量：**")
+                st.dataframe(df_layer_scan, use_container_width=True, height=200)
+
+                st.markdown("**直接套用，不用打字/複製貼上 (避免打錯字)：**")
+
+                layer_options = sorted(df_layer_scan['圖層'].unique().tolist())
+                cL1, cL2 = st.columns(2)
+                with cL1:
+                    pick_layer_for_pile = st.selectbox("選一個圖層 → 套用為「圖塊名稱/圖層名稱」欄位 (適用圓形/點模式)", [''] + layer_options, key=f"pick_layer_pile_{site_id}")
+                    if pick_layer_for_pile and st.button("✅ 套用為樁位圖層", key=f"apply_layer_pile_{site_id}"):
+                        update_site_field(ss, site_id, 'dxf_pile_block', pick_layer_for_pile)
+                        st.success(f"已套用：{pick_layer_for_pile}")
+                        st.rerun()
+                with cL2:
+                    pick_layer_for_boundary = st.selectbox("選一個圖層 → 套用為「開挖邊界圖層」", [''] + layer_options, key=f"pick_layer_boundary_{site_id}")
+                    if pick_layer_for_boundary and st.button("✅ 套用為邊界圖層", key=f"apply_layer_boundary_{site_id}"):
+                        update_site_field(ss, site_id, 'dxf_boundary_layer', pick_layer_for_boundary)
+                        st.success(f"已套用：{pick_layer_for_boundary}")
+                        st.rerun()
+
+                st.markdown("**各圖層裡的圖塊(INSERT)名稱與數量：**")
+                if df_block_scan is None or df_block_scan.empty:
+                    st.caption("這份DXF裡沒有任何圖塊(INSERT)，如果樁位是圓形/點，請用上面的圖層清單選取。")
+                else:
+                    st.dataframe(df_block_scan, use_container_width=True, height=200)
+                    block_options = df_block_scan['圖塊名稱'].unique().tolist()
+                    pick_block = st.selectbox("選一個圖塊名稱 → 套用為「圖塊名稱」欄位 (適用圖塊模式)", [''] + block_options, key=f"pick_block_{site_id}")
+                    if pick_block and st.button("✅ 套用為樁位圖塊", key=f"apply_block_{site_id}"):
+                        update_site_field(ss, site_id, 'dxf_pile_block', pick_block)
+                        st.success(f"已套用：{pick_block}")
+                        st.rerun()
+
             if c_parse.button("🔄 從 DXF 重新解析樁位與邊界"):
                 with st.spinner("解析 DXF 中..."):
                     try:
