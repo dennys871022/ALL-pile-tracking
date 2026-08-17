@@ -132,13 +132,13 @@ def get_ws(ss, name, header):
 SITE_LIST_WS = "工地清單"
 SITE_COLUMNS = [
     'site_id', 'site_name', 'total_piles',
-    'dxf_pile_source', 'dxf_pile_block', 'dxf_boundary_layer', 'match_radius',
+    'dxf_pile_source', 'dxf_pile_block', 'dxf_boundary_layer', 'match_radius', 'dxf_label_pattern',
     'pdf_loc_note_right', 'pdf_loc_note_left', 'pdf_week_est',
     'dxf_drive_file_id'
 ]
 SITE_DEFAULTS = {
     'total_piles': 262, 'dxf_pile_source': 'block', 'dxf_pile_block': 'HH3', 'dxf_boundary_layer': '開挖邊界',
-    'match_radius': 800, 'pdf_loc_note_right': '', 'pdf_loc_note_left': '', 'pdf_week_est': 20,
+    'match_radius': 800, 'dxf_label_pattern': '', 'pdf_loc_note_right': '', 'pdf_loc_note_left': '', 'pdf_week_est': 20,
     'dxf_drive_file_id': ''
 }
 PILE_SOURCE_LABELS = {
@@ -225,6 +225,8 @@ if sel_site_name == "➕ 新增工地":
                                  help="CAD 裡畫開挖邊界線的圖層名稱，程式會抓這個圖層裡的封閉多邊形。留空就不畫邊界。")
         n_radius = st.number_input("樁號文字比對半徑 (CAD單位)", 10, 100000, 800,
                                     help="樁位符號會抓「距離內最近的文字」當作樁號，這裡設定搜尋半徑。")
+        n_pattern = st.text_input("樁號文字格式規則 (正規表示式，選填)", value="",
+                                   help="如果樁位符號旁邊同時有好幾行不同文字(例如樁號+標高)，填這個可以指定「正確樁號長什麼樣子」，避免抓錯行。例如樁號都是P開頭+數字，填 ^P\\d+$")
         n_right = st.text_input("PDF 右側標題預設文字", value="")
         n_left = st.text_input("PDF 左側標題預設文字", value="")
         n_week = st.number_input("本週預計完成支數 (預設值)", 0, 1000, 20)
@@ -237,6 +239,7 @@ if sel_site_name == "➕ 新增工地":
                 add_site(ss, {
                     'site_id': n_id, 'site_name': n_name, 'total_piles': int(n_total),
                     'dxf_pile_source': n_source, 'dxf_pile_block': n_block, 'dxf_boundary_layer': n_layer, 'match_radius': int(n_radius),
+                    'dxf_label_pattern': n_pattern,
                     'pdf_loc_note_right': n_right, 'pdf_loc_note_left': n_left, 'pdf_week_est': int(n_week)
                 })
                 st.success(f"✅ 工地「{n_name}」已建立，重新整理頁面後即可從下拉選單選取。")
@@ -250,6 +253,7 @@ DXF_PILE_SOURCE = str(site_row.get('dxf_pile_source', '') or 'block').strip() or
 DXF_PILE_BLOCK = str(site_row['dxf_pile_block']) if str(site_row.get('dxf_pile_block', '')).strip() else 'HH3'
 DXF_BOUNDARY_LAYER = str(site_row.get('dxf_boundary_layer', '') or '').strip()
 MATCH_RADIUS = float(site_row['match_radius']) if str(site_row['match_radius']).strip() else 800
+DXF_LABEL_PATTERN = str(site_row.get('dxf_label_pattern', '') or '').strip()
 
 st.caption(f"📍 目前工地：**{sel_site_name}** (代碼: {site_id})　樁位總支數：{TOTAL_PILES}")
 
@@ -263,12 +267,15 @@ if not demo_mode:
             e_block = st.text_input("圖塊名稱 / 圖層名稱 (依上面選的類型而定，選「文字本身位置」則不用填)", value=DXF_PILE_BLOCK)
             e_layer = st.text_input("DXF 開挖邊界圖層(Layer)名稱 (沒有邊界線可留空)", value=DXF_BOUNDARY_LAYER)
             e_radius = st.number_input("樁號文字比對半徑 (CAD單位)", 10, 100000, int(MATCH_RADIUS))
+            e_pattern = st.text_input("樁號文字格式規則 (正規表示式，選填)", value=DXF_LABEL_PATTERN,
+                                       help="如果樁位符號旁邊有好幾行不同文字，填這個指定正確樁號的格式，例如 ^P\\d+$ 代表P開頭+數字。留空則維持「純抓最近文字」。")
             if st.form_submit_button("💾 儲存設定"):
                 update_site_field(ss, site_id, 'total_piles', e_total)
                 update_site_field(ss, site_id, 'dxf_pile_source', e_source)
                 update_site_field(ss, site_id, 'dxf_pile_block', e_block)
                 update_site_field(ss, site_id, 'dxf_boundary_layer', e_layer)
                 update_site_field(ss, site_id, 'match_radius', e_radius)
+                update_site_field(ss, site_id, 'dxf_label_pattern', e_pattern)
                 st.success("✅ 已更新，重新整理套用新設定")
                 st.rerun()
 
@@ -331,7 +338,7 @@ def scan_dxf_summary(file_bytes):
     ).sort_values('數量', ascending=False)
     return df_layer, df_block
 
-def parse_dxf(file_bytes, pile_source, pile_block, boundary_layer, match_radius=800):
+def parse_dxf(file_bytes, pile_source, pile_block, boundary_layer, match_radius=800, label_pattern=''):
     """
     讀取 DXF：
     - pile_source == 'block' : 抓指定「圖塊(Block)」的插入點當樁位 (pile_block = 圖塊名稱，支援部分包含比對)
@@ -339,6 +346,9 @@ def parse_dxf(file_bytes, pile_source, pile_block, boundary_layer, match_radius=
     - pile_source == 'point' : 抓指定「圖層」上的點(POINT)當樁位 (pile_block = 圖層名稱；留空則不篩選圖層)
     - pile_source == 'text'  : 沒有另外的幾何符號，直接把文字本身的座標當樁位
     再抓「距離最近的文字」當樁號 (text 模式除外，樁號就是文字內容本身)。
+    如果同一個樁位符號旁邊有好幾行不同文字 (例如樁號+標高兩行都貼在一起)，
+    可用 label_pattern (正規表示式，如 ^P\\d+$) 指定「正確樁號長什麼樣子」，
+    程式會優先在符合格式的文字裡挑最近的，避免抓錯成旁邊不相干的文字。
     boundary_layer 留空則不畫開挖邊界。
     """
     doc = _load_dxf_doc(file_bytes)
@@ -358,6 +368,14 @@ def parse_dxf(file_bytes, pile_source, pile_block, boundary_layer, match_radius=
             continue
     texts_df = pd.DataFrame(texts, columns=['X', 'Y', '內容'])
 
+    label_pattern = (label_pattern or '').strip()
+    label_re = None
+    if label_pattern:
+        try:
+            label_re = re.compile(label_pattern, re.IGNORECASE)
+        except re.error:
+            label_re = None
+
     pile_block = (pile_block or '').strip()
 
     if pile_source == 'text':
@@ -367,7 +385,10 @@ def parse_dxf(file_bytes, pile_source, pile_block, boundary_layer, match_radius=
         else:
             piles_df = texts_df.rename(columns={'內容': '樁號'}).copy()
             piles_df['樁號'] = piles_df['樁號'].astype(str).str.strip().str.upper()
-            piles_df = piles_df[piles_df['樁號'].str.contains(r'\d', regex=True, na=False)]
+            if label_re is not None:
+                piles_df = piles_df[piles_df['樁號'].apply(lambda t: bool(label_re.search(t)))]
+            else:
+                piles_df = piles_df[piles_df['樁號'].str.contains(r'\d', regex=True, na=False)]
             piles_df['數字'] = piles_df['樁號'].str.extract(r'(\d+)').fillna(0).astype(int)
             piles_df = piles_df.drop_duplicates(subset=['樁號']).dropna(subset=['X', 'Y']).sort_values('數字').reset_index(drop=True)
     else:
@@ -402,10 +423,20 @@ def parse_dxf(file_bytes, pile_source, pile_block, boundary_layer, match_radius=
 
         piles_df = pd.DataFrame(piles, columns=['X', 'Y'])
 
+        texts_match_mask = None
+        if label_re is not None and not texts_df.empty:
+            texts_match_mask = texts_df['內容'].apply(lambda t: bool(label_re.search(str(t))))
+
         def get_nearest_text(px, py):
             if texts_df.empty:
                 return "未命名"
             dist = np.sqrt((texts_df['X'] - px) ** 2 + (texts_df['Y'] - py) ** 2)
+            # 如果有指定格式規則，優先在符合格式的候選文字裡挑最近的
+            if texts_match_mask is not None and texts_match_mask.any():
+                dist_matched = dist[texts_match_mask]
+                idx = dist_matched.idxmin()
+                if dist_matched[idx] < match_radius:
+                    return str(texts_df.loc[idx, '內容']).strip()
             idx = dist.idxmin()
             if dist[idx] < match_radius:
                 return str(texts_df.loc[idx, '內容']).strip()
@@ -558,7 +589,7 @@ with st.expander("📐 樁位圖 / 邊界圖 資料來源設定", expanded=df_ba
             if c_parse.button("🔄 從 DXF 重新解析樁位與邊界"):
                 with st.spinner("解析 DXF 中..."):
                     try:
-                        piles_df, loops = parse_dxf(dxf_file.getvalue(), DXF_PILE_SOURCE, DXF_PILE_BLOCK, DXF_BOUNDARY_LAYER, MATCH_RADIUS)
+                        piles_df, loops = parse_dxf(dxf_file.getvalue(), DXF_PILE_SOURCE, DXF_PILE_BLOCK, DXF_BOUNDARY_LAYER, MATCH_RADIUS, DXF_LABEL_PATTERN)
                         st.session_state.site_dxf_cache[site_id] = piles_df
                         st.session_state.site_boundary_cache[site_id] = loops
                         if piles_df.empty:
