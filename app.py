@@ -166,19 +166,32 @@ def add_site(ss, site_dict):
     ws = get_ws(ss, SITE_LIST_WS, SITE_COLUMNS)
     if ws is None:
         return
-    ws.append_row([str(site_dict.get(c, SITE_DEFAULTS.get(c, ''))) for c in SITE_COLUMNS])
+    header = ws.row_values(1)
+    changed = False
+    for c in SITE_COLUMNS:
+        if c not in header:
+            header.append(c)
+            changed = True
+    if changed:
+        ws.update('A1', [header])
+    row = [str(site_dict.get(c, SITE_DEFAULTS.get(c, ''))) for c in header]
+    ws.append_row(row)
     st.cache_data.clear()
 
 def update_site_field(ss, site_id, field, value):
-    """更新工地清單裡指定工地的某一欄位 (例如儲存新上傳的 DXF file_id)"""
+    """更新工地清單裡指定工地的某一欄位 (依實際表頭欄位定位，避免新舊表格欄位順序不一致而寫錯欄)"""
     ws = get_ws(ss, SITE_LIST_WS, SITE_COLUMNS)
     if ws is None:
         return
+    header = ws.row_values(1)
+    if field not in header:
+        header.append(field)
+        ws.update('A1', [header])
+    col_num = header.index(field) + 1
     records = ws.get_all_records()
     for i, r in enumerate(records):
         if str(r.get('site_id')) == str(site_id):
             row_num = i + 2  # +1 header, +1 一位起算
-            col_num = SITE_COLUMNS.index(field) + 1
             ws.update_cell(row_num, col_num, str(value))
             break
     st.cache_data.clear()
