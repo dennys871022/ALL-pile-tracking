@@ -131,13 +131,13 @@ def get_ws(ss, name, header):
 # ============================================================
 SITE_LIST_WS = "工地清單"
 SITE_COLUMNS = [
-    'site_id', 'site_name', 'total_piles',
+    'site_id', 'site_name', 'total_piles', 'pile_number_prefix',
     'dxf_pile_source', 'dxf_pile_block', 'dxf_boundary_layer', 'match_radius', 'dxf_label_pattern',
     'pdf_loc_note_right', 'pdf_loc_note_left', 'pdf_week_est',
     'dxf_drive_file_id'
 ]
 SITE_DEFAULTS = {
-    'total_piles': 262, 'dxf_pile_source': 'block', 'dxf_pile_block': 'HH3', 'dxf_boundary_layer': '開挖邊界',
+    'total_piles': 262, 'pile_number_prefix': '', 'dxf_pile_source': 'block', 'dxf_pile_block': 'HH3', 'dxf_boundary_layer': '開挖邊界',
     'match_radius': 800, 'dxf_label_pattern': '', 'pdf_loc_note_right': '', 'pdf_loc_note_left': '', 'pdf_week_est': 20,
     'dxf_drive_file_id': ''
 }
@@ -218,6 +218,7 @@ if sel_site_name == "➕ 新增工地":
         n_id = st.text_input("工地代碼 (英數字，如 CDC / TPE01，用於雲端分頁命名，建立後不可更改)")
         n_name = st.text_input("工地顯示名稱 (如：CDC中間樁與共構樁)")
         n_total = st.number_input("樁位總支數", 1, 5000, 262)
+        n_prefix = st.text_input("樁號字首 (通常留空即可，會自動從解析出的樁號偵測；只有偵測錯誤時才手動指定覆寫)", value="")
         n_source = st.selectbox("樁位在DXF裡是用什麼畫的？", list(PILE_SOURCE_LABELS.keys()), format_func=lambda k: PILE_SOURCE_LABELS[k])
         n_block = st.text_input("圖塊名稱 / 圖層名稱 (依上面選的類型而定)", value="HH3",
                                  help="選「圖塊」：填CAD裡樁位符號的Block名稱。\n選「圓形」或「點」(通常是圖塊分解後的情況)：填這些圓形/點所在的圖層(Layer)名稱。\n選「文字本身位置」：這欄不用填。若用舊版CSV匯入，對應原本 名稱=='HH3' 那個篩選值。")
@@ -237,7 +238,7 @@ if sel_site_name == "➕ 新增工地":
                 st.error("這個工地代碼已經存在了")
             else:
                 add_site(ss, {
-                    'site_id': n_id, 'site_name': n_name, 'total_piles': int(n_total),
+                    'site_id': n_id, 'site_name': n_name, 'total_piles': int(n_total), 'pile_number_prefix': n_prefix,
                     'dxf_pile_source': n_source, 'dxf_pile_block': n_block, 'dxf_boundary_layer': n_layer, 'match_radius': int(n_radius),
                     'dxf_label_pattern': n_pattern,
                     'pdf_loc_note_right': n_right, 'pdf_loc_note_left': n_left, 'pdf_week_est': int(n_week)
@@ -254,6 +255,7 @@ DXF_PILE_BLOCK = str(site_row['dxf_pile_block']) if str(site_row.get('dxf_pile_b
 DXF_BOUNDARY_LAYER = str(site_row.get('dxf_boundary_layer', '') or '').strip()
 MATCH_RADIUS = float(site_row['match_radius']) if str(site_row['match_radius']).strip() else 800
 DXF_LABEL_PATTERN = str(site_row.get('dxf_label_pattern', '') or '').strip()
+PILE_PREFIX = str(site_row.get('pile_number_prefix', '') or '').strip().upper()
 
 st.caption(f"📍 目前工地：**{sel_site_name}** (代碼: {site_id})　樁位總支數：{TOTAL_PILES}")
 
@@ -261,6 +263,8 @@ if not demo_mode:
     with st.expander("⚙️ 編輯此工地的 DXF 讀取設定"):
         with st.form(f"edit_site_{site_id}"):
             e_total = st.number_input("樁位總支數", 1, 5000, TOTAL_PILES)
+            e_prefix = st.text_input("樁號字首 (留空=自動從樁位資料偵測；目前偵測到的值顯示在下方，只有偵測錯時才手動填覆寫)", value=str(site_row.get('pile_number_prefix', '') or ''))
+            st.caption(f"目前實際套用的字首：「{PILE_PREFIX}」" if PILE_PREFIX else "目前實際套用的字首：（無，純數字樁號）")
             e_source = st.selectbox("樁位在DXF裡是用什麼畫的？", list(PILE_SOURCE_LABELS.keys()),
                                      index=list(PILE_SOURCE_LABELS.keys()).index(DXF_PILE_SOURCE) if DXF_PILE_SOURCE in PILE_SOURCE_LABELS else 0,
                                      format_func=lambda k: PILE_SOURCE_LABELS[k])
@@ -271,6 +275,7 @@ if not demo_mode:
                                        help="如果樁位符號旁邊有好幾行不同文字，填這個指定正確樁號的格式，例如 ^P\\d+$ 代表P開頭+數字。留空則維持「純抓最近文字」。")
             if st.form_submit_button("💾 儲存設定"):
                 update_site_field(ss, site_id, 'total_piles', e_total)
+                update_site_field(ss, site_id, 'pile_number_prefix', e_prefix)
                 update_site_field(ss, site_id, 'dxf_pile_source', e_source)
                 update_site_field(ss, site_id, 'dxf_pile_block', e_block)
                 update_site_field(ss, site_id, 'dxf_boundary_layer', e_layer)
@@ -528,11 +533,77 @@ def parse_legacy_csv(boundary_file, pile_file, pile_block):
 
     return piles_df, loops
 
-df_base_raw = st.session_state.site_dxf_cache.get(site_id, pd.DataFrame(columns=['X', 'Y', '樁號', '數字']))
-boundary_loops = st.session_state.site_boundary_cache.get(site_id, [])
+# ============================================================
+# 樁位/邊界資料永久儲存 (解析完存進試算表，之後直接讀取，不用每次重傳DXF)
+# ============================================================
+PILE_DATA_COLUMNS = ['樁號', 'X', 'Y', '數字']
+BOUNDARY_COLUMNS = ['loop_index', 'points_json']
+
+def save_piles_to_sheet(ss, site_id, piles_df):
+    ws = get_ws(ss, f"{site_id}_樁位資料", PILE_DATA_COLUMNS)
+    if ws is None:
+        return
+    ws.clear()
+    if piles_df is None or piles_df.empty:
+        ws.append_row(PILE_DATA_COLUMNS)
+    else:
+        rows = [PILE_DATA_COLUMNS] + piles_df[PILE_DATA_COLUMNS].astype(str).values.tolist()
+        ws.append_rows(rows)
+    st.cache_data.clear()
+
+@st.cache_data(ttl=300)
+def load_piles_from_sheet(_ss, site_id):
+    ws = get_ws(_ss, f"{site_id}_樁位資料", PILE_DATA_COLUMNS)
+    if ws is None:
+        return pd.DataFrame(columns=['X', 'Y', '樁號', '數字'])
+    records = ws.get_all_records()
+    if not records:
+        return pd.DataFrame(columns=['X', 'Y', '樁號', '數字'])
+    df = pd.DataFrame(records)
+    df['X'] = pd.to_numeric(df['X'], errors='coerce')
+    df['Y'] = pd.to_numeric(df['Y'], errors='coerce')
+    df['數字'] = pd.to_numeric(df['數字'], errors='coerce').fillna(0).astype(int)
+    df['樁號'] = df['樁號'].astype(str).str.strip().str.upper()
+    return df.dropna(subset=['X', 'Y']).sort_values('數字').reset_index(drop=True)
+
+def save_boundary_to_sheet(ss, site_id, loops):
+    ws = get_ws(ss, f"{site_id}_邊界", BOUNDARY_COLUMNS)
+    if ws is None:
+        return
+    ws.clear()
+    rows = [BOUNDARY_COLUMNS]
+    for i, loop in enumerate(loops or []):
+        pts = [[round(float(x), 2), round(float(y), 2)] for x, y in loop]
+        rows.append([str(i), json.dumps(pts)])
+    if len(rows) == 1:
+        ws.append_row(BOUNDARY_COLUMNS)
+    else:
+        ws.append_rows(rows)
+    st.cache_data.clear()
+
+@st.cache_data(ttl=300)
+def load_boundary_from_sheet(_ss, site_id):
+    ws = get_ws(_ss, f"{site_id}_邊界", BOUNDARY_COLUMNS)
+    if ws is None:
+        return []
+    records = ws.get_all_records()
+    loops = []
+    for r in records:
+        try:
+            pts = json.loads(r['points_json'])
+            loops.append([(p[0], p[1]) for p in pts])
+        except Exception:
+            continue
+    return loops
+
+df_base_raw = load_piles_from_sheet(ss, site_id)
+boundary_loops = load_boundary_from_sheet(ss, site_id)
+if df_base_raw.empty:
+    df_base_raw = st.session_state.site_dxf_cache.get(site_id, pd.DataFrame(columns=['X', 'Y', '樁號', '數字']))
+    boundary_loops = st.session_state.site_boundary_cache.get(site_id, [])
 
 with st.expander("📐 樁位圖 / 邊界圖 資料來源設定", expanded=df_base_raw.empty):
-    st.caption("⚠️ 目前為暫時版本：DXF/CSV 僅存在本次瀏覽器工作階段，重新整理頁面需要重新上傳一次。永久記住(存到GitHub)之後補上。")
+    st.caption("解析完成後，記得按「💾 存成永久資料」寫入試算表，之後開這個工地就會自動讀取，不用再重傳DXF/CSV。")
     import_mode = st.radio("匯入方式", ["📄 上傳 DXF (自動讀取)", "📊 上傳舊版 CSV (排樁座標.csv + 中間樁.csv)"], horizontal=True, key=f"import_mode_{site_id}")
 
     if import_mode.startswith("📄"):
@@ -595,7 +666,7 @@ with st.expander("📐 樁位圖 / 邊界圖 資料來源設定", expanded=df_ba
                         if piles_df.empty:
                             st.warning("⚠️ 解析完成，但讀到 0 支樁位，請先用左邊「掃描」按鈕確認圖層/圖塊名稱有沒有打對。")
                         else:
-                            st.success(f"✅ 解析完成：讀到 {len(piles_df)} 支樁位、{len(loops)} 條邊界線")
+                            st.success(f"✅ 解析完成(暫存)：讀到 {len(piles_df)} 支樁位、{len(loops)} 條邊界線。確認沒問題後，記得往下按「💾 存成永久資料」，不然重新整理頁面就會消失。")
                         st.rerun()
                     except Exception as e:
                         st.error(f"DXF 解析失敗: {e}")
@@ -609,11 +680,43 @@ with st.expander("📐 樁位圖 / 邊界圖 資料來源設定", expanded=df_ba
                     piles_df, loops = parse_legacy_csv(boundary_csv, pile_csv, DXF_PILE_BLOCK)
                 st.session_state.site_dxf_cache[site_id] = piles_df
                 st.session_state.site_boundary_cache[site_id] = loops
-                st.success(f"✅ 解析完成：讀到 {len(piles_df)} 支樁位、{len(loops)} 條邊界線")
+                st.success(f"✅ 解析完成(暫存)：讀到 {len(piles_df)} 支樁位、{len(loops)} 條邊界線。確認沒問題後，記得往下按「💾 存成永久資料」，不然重新整理頁面就會消失。")
                 st.rerun()
 
+    pending_piles = st.session_state.site_dxf_cache.get(site_id)
+    pending_loops = st.session_state.site_boundary_cache.get(site_id)
+    if pending_piles is not None and not pending_piles.empty:
+        st.info(f"📋 本次瀏覽器暫存了新解析結果：{len(pending_piles)} 支樁位、{len(pending_loops or [])} 條邊界線，尚未寫入試算表。")
+
+        # 換圖前檢查：已經登錄過的樁號，在這次新解析的結果裡還找不找得到
+        try:
+            existing_ws = get_ws(ss, HIST_WS_NAME, HIST_COLUMNS)
+            existing_records = existing_ws.get_all_records() if existing_ws else []
+            logged_piles = set(str(r.get('樁號', '')).upper().strip() for r in existing_records if r.get('樁號'))
+        except Exception:
+            logged_piles = set()
+
+        new_pile_set = set(pending_piles['樁號'].astype(str).str.upper().str.strip().values)
+        missing_after_update = logged_piles - new_pile_set
+        if missing_after_update:
+            st.warning(
+                f"⚠️ 換圖提醒：已經登錄過施工紀錄的 {len(missing_after_update)} 個樁號，在這次新解析的結果裡找不到對應樁位，"
+                f"存檔後這些樁號會從地圖上消失(登錄紀錄本身不會被刪除，只是沒有座標可以顯示)。\n\n"
+                f"找不到的樁號：{', '.join(sorted(missing_after_update)[:30])}" + (" ..." if len(missing_after_update) > 30 else "")
+            )
+
+        if not demo_mode and st.button("💾 存成永久資料 (寫入試算表，之後開網頁自動讀取，不用再重傳)", type="primary", key=f"save_persist_{site_id}"):
+            with st.spinner("寫入試算表中..."):
+                save_piles_to_sheet(ss, site_id, pending_piles)
+                save_boundary_to_sheet(ss, site_id, pending_loops or [])
+                del st.session_state.site_dxf_cache[site_id]
+                if site_id in st.session_state.site_boundary_cache:
+                    del st.session_state.site_boundary_cache[site_id]
+            st.success("✅ 已存成永久資料，之後開這個工地會自動讀取，不用再上傳DXF/CSV。")
+            st.rerun()
+
     if not df_base_raw.empty or boundary_loops:
-        st.caption(f"目前已載入 {len(df_base_raw)} 支樁位、{len(boundary_loops)} 條邊界線")
+        st.caption(f"✅ 目前使用永久資料：{len(df_base_raw)} 支樁位、{len(boundary_loops)} 條邊界線")
 
 # ============================================================
 # 額外樁位 (人工補充，取代舊版寫死的座標公式)
@@ -666,6 +769,20 @@ else:
 
 if not df_base.empty:
     df_base = df_base.drop_duplicates(subset=['樁號']).dropna(subset=['X', 'Y']).sort_values('數字').reset_index(drop=True)
+
+def infer_pile_prefix(df_b):
+    """從實際解析出來的樁號自動推斷字首規律 (取出現次數最多的英文字首)，不用手動填兩次"""
+    if df_b is None or df_b.empty:
+        return ''
+    prefixes = df_b['樁號'].astype(str).str.extract(r'^([A-Za-z\-]*)\d+')[0].fillna('')
+    prefixes = prefixes[prefixes != '']
+    if prefixes.empty:
+        return ''
+    mode = prefixes.mode()
+    return mode.iloc[0] if not mode.empty else ''
+
+if not PILE_PREFIX:
+    PILE_PREFIX = infer_pile_prefix(df_base)
 
 # 因為樁位與邊界現在來自同一份 DXF (同一個座標系統)，不再需要舊版那段
 # 手動校正 P1 vs 中間樁1號 座標偏移的 hack。若你的樁位/邊界仍分屬不同來源檔案
@@ -836,7 +953,9 @@ t1, t2 = st.tabs(["🎯 推算", "✏️ 手動"])
 with t1:
     with st.form("a"):
         cc1, cc2, cc3 = st.columns(3)
-        sp = cc1.number_input("起始號碼", 1, TOTAL_PILES, 1)
+        prefix_hint = f"（目前工地字首：{PILE_PREFIX}）" if PILE_PREFIX else "（目前工地無字首，純數字）"
+        st.caption(f"樁號格式 {prefix_hint}")
+        sp = cc1.number_input("起始號碼 (不含字首)", 1, TOTAL_PILES, 1)
         dr = cc2.radio("方向", ["遞增", "遞減"])
         ct = cc3.number_input("數量", 1, 200, 10)
         if st.form_submit_button("執行登錄"):
@@ -844,13 +963,13 @@ with t1:
             cur = sp
             for _ in range(int(ct)):
                 if 1 <= cur <= TOTAL_PILES:
-                    plist.append(f"{cur}")
+                    plist.append(f"{PILE_PREFIX}{cur}")
                 cur = cur + step if dr == "遞增" else cur - step
             process_and_save(plist)
 
 with t2:
     with st.form("m"):
-        raw = st.text_input("區間 (支援直接輸入文字與數字，例如 A1-A3, BC1-BC6, 27-30)")
+        raw = st.text_input("區間 (支援直接輸入文字與數字，例如 A1-A3, BC1-BC6, 27-30, P1-P50)")
         if st.form_submit_button("執行登錄"):
             process_and_save(parse_range_generic(raw, TOTAL_PILES))
 
