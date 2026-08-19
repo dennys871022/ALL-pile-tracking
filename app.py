@@ -874,7 +874,13 @@ if not df_history_full.empty:
 # ============================================================
 # 樁號區間解析 (通用版：任何「英文字首+數字」區間都支援)
 # ============================================================
-def parse_range_generic(raw_str, total_piles):
+def parse_range_generic(raw_str, total_piles, default_prefix=''):
+    """
+    解析樁號區間文字。如果輸入本身已經帶字首 (如 BC1-BC6、A1) 就照原樣使用；
+    如果輸入是純數字 (如 27-30、65)，且工地本身有預設字首，會自動補上，
+    不用每次都手動打字首。
+    """
+    default_prefix = (default_prefix or '').strip().upper()
     plist = []
     if raw_str:
         pts = re.split(r'[,\s]+', raw_str.strip())
@@ -885,7 +891,7 @@ def parse_range_generic(raw_str, total_piles):
                 m = re.match(r'^([A-Za-z]*)(\d+)-([A-Za-z]*)(\d+)$', pt.upper())
                 if m:
                     p1, n1, p2, n2 = m.groups()
-                    prefix = p1 or p2
+                    prefix = p1 or p2 or default_prefix
                     n1, n2 = int(n1), int(n2)
                     if prefix:
                         for n in range(min(n1, n2), max(n1, n2) + 1):
@@ -900,7 +906,10 @@ def parse_range_generic(raw_str, total_piles):
                             for n in range(1, n2 + 1):
                                 plist.append(f"{n}")
             else:
-                plist.append(pt.upper())
+                token = pt.upper()
+                if default_prefix and re.match(r'^\d+$', token):
+                    token = f"{default_prefix}{token}"
+                plist.append(token)
     return list(dict.fromkeys(plist))
 
 st.markdown("### 📝 進度登錄")
@@ -971,7 +980,7 @@ with t2:
     with st.form("m"):
         raw = st.text_input("區間 (支援直接輸入文字與數字，例如 A1-A3, BC1-BC6, 27-30, P1-P50)")
         if st.form_submit_button("執行登錄"):
-            process_and_save(parse_range_generic(raw, TOTAL_PILES))
+            process_and_save(parse_range_generic(raw, TOTAL_PILES, PILE_PREFIX))
 
 st.divider()
 
@@ -1109,8 +1118,8 @@ with c_btn2:
     st.markdown("**👉 方式二：將【文字輸入】的範圍分配給**")
     manual_raw = st.text_input("輸入樁號區間 (如: 27-30, BC1-BC6, A1)", label_visibility="collapsed")
     cb3, cb4 = st.columns(2)
-    if cb3.button("📌 A機 (輸入)"): st.session_state.sel_a = parse_range_generic(manual_raw, TOTAL_PILES); st.rerun()
-    if cb4.button("📌 B機 (輸入)"): st.session_state.sel_b = parse_range_generic(manual_raw, TOTAL_PILES); st.rerun()
+    if cb3.button("📌 A機 (輸入)"): st.session_state.sel_a = parse_range_generic(manual_raw, TOTAL_PILES, PILE_PREFIX); st.rerun()
+    if cb4.button("📌 B機 (輸入)"): st.session_state.sel_b = parse_range_generic(manual_raw, TOTAL_PILES, PILE_PREFIX); st.rerun()
 
 with c_btn3:
     st.markdown("**🗑️ 重新設定**")
@@ -1124,6 +1133,8 @@ if not df_history_plot.empty or not df_p.empty:
     st.sidebar.text_input("左側副標題", key="pdf_loc_note_left")
     st.sidebar.number_input("本週預計完成 (支)", key="pdf_week_est", step=1)
     show_seq = st.sidebar.checkbox("🔢 PDF 圖上顯示施作順序 (機台+順序號)", value=True)
+    use_adjust_text = st.sidebar.checkbox("🧲 自動防重疊 (adjustText)", value=True,
+                                           help="關掉後改用左側「文字離圓圈距離」等手動設定固定擺放文字位置，adjustText有時候在樁位很密集時反而會讓字疊在一起。")
 
     st.sidebar.markdown("### 🎛️ PDF 圖表幾何微調")
     with st.sidebar.form("geom"):
@@ -1176,7 +1187,7 @@ if not df_history_plot.empty or not df_p.empty:
             st.session_state.ui_settings = new_s
             st.sidebar.success("✅ 設定已寫入雲端永久記憶")
 
-    def draw_pdf_axis(ax, target_df, global_df, scale_factor=1.0, is_main=False, show_seq=True):
+    def draw_pdf_axis(ax, target_df, global_df, scale_factor=1.0, is_main=False, show_seq=True, use_adjust_text=True):
         label_texts = []
         label_points_x = []
         label_points_y = []
@@ -1246,7 +1257,7 @@ if not df_history_plot.empty or not df_p.empty:
                         for _, row in sub.iterrows():
                             p = row['樁號']; s_txt = row['純順序']
                             combo = f"{p}\n{s_txt}" if (show_seq and s_txt) else p
-                            if ADJUSTTEXT_READY:
+                            if ADJUSTTEXT_READY and use_adjust_text:
                                 t = ax.text(row['X'], row['Y'], combo, fontsize=fsize,
                                             fontweight='bold', color='black', ha='center', va='center', zorder=5)
                             else:
@@ -1263,7 +1274,7 @@ if not df_history_plot.empty or not df_p.empty:
                 elif is_main:
                     ax.scatter([], [], color=c, s=msize, zorder=3, label=legend_label)
 
-        if ADJUSTTEXT_READY and label_texts:
+        if ADJUSTTEXT_READY and use_adjust_text and label_texts:
             adjust_text(
                 label_texts,
                 x=label_points_x, y=label_points_y,
@@ -1305,26 +1316,26 @@ if not df_history_plot.empty or not df_p.empty:
 
             if not (has_a or has_b):
                 ax = fig.add_axes([0.45, 0.1, 0.5, 0.75])
-                draw_pdf_axis(ax, df_p, df_p, 1.0, True, show_seq)
+                draw_pdf_axis(ax, df_p, df_p, 1.0, True, show_seq, use_adjust_text)
                 ax.legend(loc='lower left', bbox_to_anchor=(pos_leg_x, pos_leg_y), fontsize=28 * fig_scale, markerscale=1.5)
             else:
                 if has_a and has_b:
                     ax_a = fig.add_axes([pos_img_a_x, pos_img_a_y, pos_img_a_w, 0.75])
-                    draw_pdf_axis(ax_a, df_p[df_p['樁號'].isin(st.session_state.sel_a)], df_p, 1.0, True, show_seq)
+                    draw_pdf_axis(ax_a, df_p[df_p['樁號'].isin(st.session_state.sel_a)], df_p, 1.0, True, show_seq, use_adjust_text)
                     ax_a.set_title("A機作業區", fontsize=40*fig_scale, fontweight='bold', y=-0.05)
                     ax_a.legend(loc='lower left', bbox_to_anchor=(pos_leg_x, pos_leg_y), fontsize=28*fig_scale, markerscale=1.5)
 
                     ax_b = fig.add_axes([pos_img_b_x, pos_img_b_y, pos_img_b_w, 0.75])
-                    draw_pdf_axis(ax_b, df_p[df_p['樁號'].isin(st.session_state.sel_b)], df_p, 1.0, False, show_seq)
+                    draw_pdf_axis(ax_b, df_p[df_p['樁號'].isin(st.session_state.sel_b)], df_p, 1.0, False, show_seq, use_adjust_text)
                     ax_b.set_title("B機作業區", fontsize=40*fig_scale, fontweight='bold', y=-0.05)
                 elif has_a:
                     ax_a = fig.add_axes([pos_img_a_x, pos_img_a_y, pos_img_a_w, 0.75])
-                    draw_pdf_axis(ax_a, df_p[df_p['樁號'].isin(st.session_state.sel_a)], df_p, 1.0, True, show_seq)
+                    draw_pdf_axis(ax_a, df_p[df_p['樁號'].isin(st.session_state.sel_a)], df_p, 1.0, True, show_seq, use_adjust_text)
                     ax_a.set_title("A機作業區", fontsize=40*fig_scale, fontweight='bold', y=-0.05)
                     ax_a.legend(loc='lower left', bbox_to_anchor=(pos_leg_x, pos_leg_y), fontsize=28*fig_scale, markerscale=1.5)
                 elif has_b:
                     ax_b = fig.add_axes([pos_img_b_x, pos_img_b_y, pos_img_b_w, 0.75])
-                    draw_pdf_axis(ax_b, df_p[df_p['樁號'].isin(st.session_state.sel_b)], df_p, 1.0, True, show_seq)
+                    draw_pdf_axis(ax_b, df_p[df_p['樁號'].isin(st.session_state.sel_b)], df_p, 1.0, True, show_seq, use_adjust_text)
                     ax_b.set_title("B機作業區", fontsize=40*fig_scale, fontweight='bold', y=-0.05)
                     ax_b.legend(loc='lower left', bbox_to_anchor=(pos_leg_x, pos_leg_y), fontsize=28*fig_scale, markerscale=1.5)
 
@@ -1351,8 +1362,10 @@ if not df_history_plot.empty or not df_p.empty:
             return fig
 
         pdf_fig = create_pdf_figure(); st.divider()
-        if ADJUSTTEXT_READY:
+        if ADJUSTTEXT_READY and use_adjust_text:
             st.caption("✅ 文字防重疊模組 (adjustText) 已啟用")
+        elif ADJUSTTEXT_READY and not use_adjust_text:
+            st.caption("🔧 文字防重疊模組已手動關閉，目前使用左側「文字離圓圈距離」等手動設定固定擺放")
         else:
             st.caption("⚠️ 文字防重疊模組 (adjustText) 未安裝成功，目前使用備援手動偏移。請確認 requirements.txt 內有 adjustText 並重新 Reboot App。")
         st.pyplot(pdf_fig)
